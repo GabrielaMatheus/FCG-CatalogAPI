@@ -2,6 +2,7 @@ using FiapCloudGames.CatalogApi.Data;
 using FiapCloudGames.CatalogApi.Domain;
 using FiapCloudGames.CatalogApi.Exceptions;
 using FiapCloudGames.CatalogApi.Services;
+using FiapCloudGames.Contracts;
 using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -38,7 +39,12 @@ public class OrderServiceTests
         var order = await service.PlaceOrderAsync(Guid.NewGuid(), jogo.Id, "user@teste.com");
 
         Assert.Equal(OrderStatus.Pending, order.Status);
-        publishMock.Verify(p => p.Publish(It.IsAny<object>(), It.IsAny<CancellationToken>()), Times.Once);
+        publishMock.Verify(p => p.Publish(It.Is<OrderPlacedEvent>(e =>
+            e.OrderId == order.Id &&
+            e.GameId == jogo.Id &&
+            e.UserEmail == "user@teste.com" &&
+            e.GameName == jogo.Name &&
+            e.Price == jogo.Price), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]

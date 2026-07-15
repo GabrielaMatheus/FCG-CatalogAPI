@@ -1,0 +1,12 @@
+bin/
+obj/
+.git/
+.vs/
+.vscode/
+*.user
+*.suo
+*.db
+*.db-shm
+*.db-wal
+README.md
+tests/
