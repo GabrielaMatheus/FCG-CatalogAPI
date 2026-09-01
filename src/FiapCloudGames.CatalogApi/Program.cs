@@ -9,6 +9,8 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
+using MongoDB.Driver;
+using Prometheus;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -21,8 +23,26 @@ if (string.IsNullOrWhiteSpace(jwtSecret) || jwtSecret.Length < 32)
 builder.Services.AddDbContext<CatalogDbContext>(options =>
     options.UseSqlite(builder.Configuration.GetConnectionString("CatalogDatabase")));
 
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = builder.Configuration.GetConnectionString("Redis")
+                            ?? builder.Configuration["Redis:ConnectionString"]
+                            ?? "localhost:6379";
+    options.InstanceName = "fcg-catalog:";
+});
+builder.Services.AddSingleton<IMongoClient>(_ =>
+    new MongoClient(builder.Configuration.GetConnectionString("MongoDb")
+                    ?? builder.Configuration["MongoDb:ConnectionString"]
+                    ?? "mongodb://localhost:27017"));
+builder.Services.AddSingleton(sp =>
+{
+    var client = sp.GetRequiredService<IMongoClient>();
+    var databaseName = builder.Configuration["MongoDb:Database"] ?? "fcg_catalog";
+    return client.GetDatabase(databaseName);
+});
 builder.Services.AddScoped<GameService>();
 builder.Services.AddScoped<OrderService>();
+builder.Services.AddScoped<GameReviewService>();
 
 builder.Services.AddMassTransit(bus =>
 {
@@ -87,9 +107,11 @@ var app = builder.Build();
 app.UseMiddleware<ApiExceptionMiddleware>();
 app.UseSwagger();
 app.UseSwaggerUI();
+app.UseHttpMetrics();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapHealthChecks("/health");
+app.MapMetrics();
 
 using (var scope = app.Services.CreateScope())
 {
@@ -107,6 +129,37 @@ games.MapGet("/", async (GameService service, CancellationToken ct) =>
 games.MapGet("/{id:guid}", async (Guid id, GameService service, CancellationToken ct) =>
     Results.Ok((await service.FindAsync(id, ct)).ToResponse()))
     .RequireAuthorization();
+
+games.MapGet("/{id:guid}/reviews", async (Guid id, GameReviewService service, CancellationToken ct) =>
+    Results.Ok((await service.ListByGameAsync(id, ct)).Select(r => r.ToResponse())))
+    .RequireAuthorization();
+
+games.MapPost("/{id:guid}/reviews", async (
+    Guid id,
+    CreateGameReviewRequest request,
+    ClaimsPrincipal principal,
+    GameReviewService service,
+    CancellationToken ct) =>
+{
+    var userIdValue = principal.FindFirstValue(ClaimTypes.NameIdentifier);
+    if (!Guid.TryParse(userIdValue, out var userId)) return Results.Unauthorized();
+
+    var userEmail = principal.FindFirstValue(ClaimTypes.Email)
+                    ?? principal.FindFirstValue("email")
+                    ?? principal.FindFirstValue(ClaimTypes.Name);
+
+    var review = await service.CreateAsync(
+        id,
+        userId,
+        userEmail ?? "usuario-sem-email",
+        request.Rating,
+        request.Comment,
+        request.Metadata,
+        ct);
+
+    return Results.Created($"/api/games/{id}/reviews/{review.Id}", review.ToResponse());
+})
+.RequireAuthorization();
 
 games.MapPost("/", async (CreateGameRequest request, GameService service, CancellationToken ct) =>
 {
@@ -176,11 +229,16 @@ public partial class Program;
 public sealed record CreateGameRequest(string Name, string Description, decimal Price);
 public sealed record UpdateGameRequest(string Name, string Description, decimal Price);
 public sealed record GameResponse(Guid Id, string Name, string Description, decimal Price);
+public sealed record CreateGameReviewRequest(int Rating, string Comment, Dictionary<string, string>? Metadata);
+public sealed record GameReviewResponse(string Id, Guid GameId, Guid UserId, string UserEmail, int Rating, string Comment, Dictionary<string, string> Metadata, DateTime CreatedAtUtc);
 
 internal static class ResponseMapping
 {
     public static GameResponse ToResponse(this FiapCloudGames.CatalogApi.Domain.Game game) =>
         new(game.Id, game.Name, game.Description, game.Price);
+
+    public static GameReviewResponse ToResponse(this FiapCloudGames.CatalogApi.Domain.GameReview review) =>
+        new(review.Id, review.GameId, review.UserId, review.UserEmail, review.Rating, review.Comment, review.Metadata, review.CreatedAtUtc);
 }
 
 internal static class AuthorizationExtensions

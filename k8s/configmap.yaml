@@ -5,6 +5,8 @@ metadata:
 data:
   Jwt__Issuer: "FiapCloudGames.UsersApi"
   Jwt__Audience: "FiapCloudGames"
+  MongoDb__Database: "fcg_catalog"
+  ConnectionStrings__Redis: "redis:6379"
   RabbitMq__Host: "rabbitmq"
   RabbitMq__Username: "guest"
   ASPNETCORE_URLS: "http://+:8080"

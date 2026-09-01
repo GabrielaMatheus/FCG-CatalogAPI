@@ -9,6 +9,8 @@ cada usuario e por iniciar o fluxo de compra.
 - Consulta da biblioteca de um usuario (`/api/users/{userId}/library`).
 - Inicio da compra de um jogo (`/api/users/{userId}/games/{gameId}/purchase`):
   cria um pedido `Pending` e publica `OrderPlacedEvent`.
+- Avaliacoes flexiveis de jogos em MongoDB (`/api/games/{id}/reviews`).
+- Cache distribuido com Redis para consultas do catalogo.
 - Consumo do `PaymentProcessedEvent` publicado pela PaymentsAPI: atualiza o
   pedido e, se `Approved`, adiciona o jogo na biblioteca do usuario.
 
@@ -28,16 +30,17 @@ A CatalogAPI **nao emite** tokens, apenas valida os tokens JWT emitidos pela
 UsersAPI. Por isso `Jwt:Issuer`, `Jwt:Audience` e `Jwt:SecretKey` devem ser
 identicos aos configurados na UsersAPI.
 
-> Importante (alinhar com o parceiro): o endpoint de compra le o e-mail do
-> usuario a partir do claim `ClaimTypes.Email`/`email` do token. Confirme que
-> o `JwtTokenService` da UsersAPI inclui esse claim ao gerar o token -
-> caso contrario, adaptar aqui para o nome de claim correto.
+O endpoint de compra le o e-mail do usuario a partir do claim
+`ClaimTypes.Email`/`email` do token emitido pela UsersAPI.
 
 ## Variaveis de ambiente
 
 | Variavel | Descricao | Sensivel |
 |---|---|---|
 | `ConnectionStrings__CatalogDatabase` | Connection string do SQLite | Sim (Secret) |
+| `ConnectionStrings__MongoDb` | Connection string do MongoDB para avaliacoes | Sim (Secret) |
+| `ConnectionStrings__Redis` | Endpoint do Redis para cache do catalogo | Nao (ConfigMap) |
+| `MongoDb__Database` | Nome do banco MongoDB usado pela CatalogAPI | Nao (ConfigMap) |
 | `Jwt__Issuer` | Emissor esperado no token | Nao (ConfigMap) |
 | `Jwt__Audience` | Audiencia esperada no token | Nao (ConfigMap) |
 | `Jwt__SecretKey` | Chave usada para validar a assinatura do token (>= 32 chars) | Sim (Secret) |
@@ -77,6 +80,12 @@ docker run -p 5102:8080 \
 ## Kubernetes
 
 Manifestos em `/k8s`: `ConfigMap`, `Secret`, `Deployment` e `Service`.
+
+## Fase 3 - NoSQL, cache e observabilidade
+
+- MongoDB armazena avaliacoes de jogos, que possuem formato mais flexivel que o catalogo relacional.
+- Redis armazena temporariamente consultas do catalogo para reduzir leituras repetidas no SQLite.
+- O endpoint `/metrics` expoe metricas no formato Prometheus para uso com Prometheus e Grafana.
 
 ```bash
 kubectl apply -f k8s/
