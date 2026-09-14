@@ -80,8 +80,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
 
 builder.Services.AddAuthorization(options =>
     options.AddPolicy("Administrator", policy => policy.RequireRole("Administrador", "Administrator")));
-// Aceita os dois nomes de role para nao depender de como a UsersAPI grava o claim
-// (no monolito original era "Administrador"; ajustar aqui se o parceiro usar outro valor).
+// Mantem compatibilidade com os perfis emitidos nas versoes anteriores da UsersAPI.
 
 builder.Services.AddHealthChecks();
 builder.Services.AddEndpointsApiExplorer();
@@ -104,10 +103,10 @@ builder.Services.AddSwaggerGen(options =>
 });
 
 var app = builder.Build();
+app.UseHttpMetrics();
 app.UseMiddleware<ApiExceptionMiddleware>();
 app.UseSwagger();
-app.UseSwaggerUI();
-app.UseHttpMetrics();
+app.UseSwaggerUI(options => options.SwaggerEndpoint("v1/swagger.json", "FCG Catalog API v1"));
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapHealthChecks("/health");
