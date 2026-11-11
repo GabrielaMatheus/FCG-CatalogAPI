@@ -1,94 +1,77 @@
-# FIAP Cloud Games - CatalogAPI
+# FIAP Cloud Games - CatalogAPI - Fase 4
 
-Microsservico responsavel pelo CRUD de jogos, pela biblioteca de jogos de
-cada usuario e por iniciar o fluxo de compra.
+Microsservico .NET 8 responsavel pelo catalogo, compras, biblioteca, avaliacoes em MongoDB, cache distribuido e busca avancada.
 
-## Responsabilidades
+## Funcionalidades
 
-- CRUD de jogos (`/api/games`), com escrita restrita a administradores.
-- Consulta da biblioteca de um usuario (`/api/users/{userId}/library`).
-- Inicio da compra de um jogo (`/api/users/{userId}/games/{gameId}/purchase`):
-  cria um pedido `Pending` e publica `OrderPlacedEvent`.
-- Avaliacoes flexiveis de jogos em MongoDB (`/api/games/{id}/reviews`).
-- Cache distribuido com Redis para consultas do catalogo.
-- Consumo do `PaymentProcessedEvent` publicado pela PaymentsAPI: atualiza o
-  pedido e, se `Approved`, adiciona o jogo na biblioteca do usuario.
+- CRUD relacional de jogos, com escrita restrita a administradores.
+- Avaliacoes flexiveis em MongoDB usando o driver oficial `MongoDB.Driver`.
+- Cache de consultas com `IDistributedCache` e Redis; as respostas de leitura informam `X-Cache: HIT|MISS`.
+- Indexacao no Elasticsearch quando um jogo e criado, editado ou removido.
+- Reconciliacao do indice com o banco relacional na inicializacao.
+- `GET /search?q=...&limit=...` com `multi_match`, fuzziness `AUTO`, peso maior para o nome e ordenacao por `_score`.
+- Compras assincronas por RabbitMQ/MassTransit.
+- Metricas Prometheus, health check, JWT e Swagger.
 
-## Fluxo de compra
+## Persistencia poliglota
 
-1. Cliente autenticado chama `POST /api/users/{userId}/games/{gameId}/purchase`.
-2. CatalogAPI valida se o usuario ja nao possui o jogo, cria o pedido (`Pending`)
-   e publica `OrderPlacedEvent { OrderId, UserId, GameId, UserEmail, GameName, Price, PlacedAtUtc }`.
-3. PaymentsAPI consome o evento, simula o pagamento e publica `PaymentProcessedEvent`
-   com `Status = Approved` ou `Rejected`.
-4. CatalogAPI consome o `PaymentProcessedEvent`: atualiza o pedido e, se aprovado,
-   adiciona o jogo na biblioteca do usuario.
+| Dado | Tecnologia | Motivo |
+| --- | --- | --- |
+| Jogos, pedidos e biblioteca | PostgreSQL em producao; SQLite no desenvolvimento | Consistencia transacional |
+| Avaliacoes e metadata flexivel | MongoDB | Documento flexivel e crescimento independente |
+| Consultas de catalogo | Redis | Reducao de latencia e round-trips |
+| Indice de busca | Elastic Cloud hospedado no Microsoft Azure | Fuzzy search e ranking por relevancia |
 
-## Autenticacao
+## Endpoints da Fase 4
 
-A CatalogAPI **nao emite** tokens, apenas valida os tokens JWT emitidos pela
-UsersAPI. Por isso `Jwt:Issuer`, `Jwt:Audience` e `Jwt:SecretKey` devem ser
-identicos aos configurados na UsersAPI.
+| Metodo | Rota | Descricao |
+| --- | --- | --- |
+| GET | `/search?q=Avetura&limit=20` | Busca tolerante a erro de digitacao, ordenada por relevancia |
+| GET | `/api/games` | Lista jogos e informa `X-Cache` |
+| GET | `/api/games/{id}` | Consulta um jogo e informa `X-Cache` |
+| POST | `/api/games` | Cria e indexa um jogo |
+| PUT | `/api/games/{id}` | Atualiza o jogo e o indice |
+| DELETE | `/api/games/{id}` | Remove o jogo e o documento do indice |
+| GET/POST | `/api/games/{id}/reviews` | Consulta ou cria avaliacao no MongoDB |
 
-O endpoint de compra le o e-mail do usuario a partir do claim
-`ClaimTypes.Email`/`email` do token emitido pela UsersAPI.
+Todas as rotas exigem JWT; operacoes de escrita no catalogo exigem o perfil de administrador.
 
-## Variaveis de ambiente
+## Configuracao
 
-| Variavel | Descricao | Sensivel |
-|---|---|---|
-| `ConnectionStrings__CatalogDatabase` | Connection string do SQLite | Sim (Secret) |
-| `ConnectionStrings__MongoDb` | Connection string do MongoDB para avaliacoes | Sim (Secret) |
-| `ConnectionStrings__Redis` | Endpoint do Redis para cache do catalogo | Nao (ConfigMap) |
-| `MongoDb__Database` | Nome do banco MongoDB usado pela CatalogAPI | Nao (ConfigMap) |
-| `Jwt__Issuer` | Emissor esperado no token | Nao (ConfigMap) |
-| `Jwt__Audience` | Audiencia esperada no token | Nao (ConfigMap) |
-| `Jwt__SecretKey` | Chave usada para validar a assinatura do token (>= 32 chars) | Sim (Secret) |
-| `RabbitMq__Host` | Host do RabbitMQ | Nao (ConfigMap) |
-| `RabbitMq__Username` | Usuario do RabbitMQ | Nao (ConfigMap) |
-| `RabbitMq__Password` | Senha do RabbitMQ | Sim (Secret) |
+Valores sensiveis nao ficam em `appsettings.json` nem nos manifestos. Em producao, o repositorio de orquestracao sincroniza o Azure Key Vault com o Secret `fcg-runtime` do Kubernetes.
 
-## Executando localmente
+| Variavel | Origem em producao |
+| --- | --- |
+| `ConnectionStrings__CatalogDatabase` | Azure Key Vault - PostgreSQL Flexible Server |
+| `ConnectionStrings__MongoDb` | Azure Key Vault - Cosmos DB for MongoDB |
+| `ConnectionStrings__Redis` | Azure Key Vault - Azure Managed Redis |
+| `Elasticsearch__Uri`, `Elasticsearch__Username`, `Elasticsearch__Password` | Azure Key Vault - Elastic Cloud on Azure |
+| `Jwt__SecretKey` | Azure Key Vault |
+| `RabbitMq__Username`, `RabbitMq__Password` | Azure Key Vault |
 
-```bash
-cd src/FiapCloudGames.CatalogApi
-dotnet run
+Configuracoes nao sensiveis: `Database__Provider`, `MongoDb__Database`, `Elasticsearch__IndexName`, issuer/audience JWT e host do RabbitMQ.
+
+## Testes
+
+```powershell
+dotnet test tests/FiapCloudGames.CatalogApi.Tests/FiapCloudGames.CatalogApi.Tests.csproj
 ```
 
-Swagger disponivel em `http://localhost:<porta>/swagger`.
+Os testes cobrem o fluxo de compra e a sincronizacao do indice em criacao, edicao e exclusao de jogos.
 
-## Rodando os testes
+## CI/CD
 
-```bash
-cd tests/FiapCloudGames.CatalogApi.Tests
-dotnet test
-```
+`.github/workflows/ci-cd.yml` executa build, testes, build da imagem, Trivy, push com tag do commit para o Azure Container Registry e rolling update no AKS. A autenticacao Azure usa OIDC, sem client secret persistente.
 
-## Docker
+Configure o GitHub Environment `production` com estas variables:
 
-```bash
-docker build -t catalog-api:latest .
-docker run -p 5102:8080 \
-  -e ConnectionStrings__CatalogDatabase="Data Source=/data/catalog.db" \
-  -e Jwt__Issuer=FiapCloudGames.UsersApi \
-  -e Jwt__Audience=FiapCloudGames \
-  -e Jwt__SecretKey=development-only-secret-key-change-me-123456789 \
-  -e RabbitMq__Host=host.docker.internal \
-  catalog-api:latest
-```
+- `AZURE_CLIENT_ID`
+- `AZURE_TENANT_ID`
+- `AZURE_SUBSCRIPTION_ID`
+- `AZURE_RESOURCE_GROUP`
+- `AKS_CLUSTER_NAME`
+- `ACR_NAME`
+- `ACR_LOGIN_SERVER`
+- `ACR_REPOSITORY=fcg-catalog-api`
 
-## Kubernetes
-
-Manifestos em `/k8s`: `ConfigMap`, `Secret`, `Deployment` e `Service`.
-
-## Fase 3 - NoSQL, cache e observabilidade
-
-- MongoDB armazena avaliacoes de jogos, que possuem formato mais flexivel que o catalogo relacional.
-- Redis armazena temporariamente consultas do catalogo para reduzir leituras repetidas no SQLite.
-- O endpoint `/metrics` expoe metricas no formato Prometheus para uso com Prometheus e Grafana.
-
-```bash
-kubectl apply -f k8s/
-```
-
-O servico fica acessivel dentro do cluster em `http://catalog-api:80`.
+O provisionamento e o deploy inicial estao documentados no repositorio `FCG-Orchestration`.

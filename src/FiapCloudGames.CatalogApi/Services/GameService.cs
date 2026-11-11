@@ -7,19 +7,29 @@ using System.Text.Json;
 
 namespace FiapCloudGames.CatalogApi.Services;
 
-public class GameService(CatalogDbContext db, IDistributedCache? cache = null)
+public class GameService(
+    CatalogDbContext db,
+    IDistributedCache? cache = null,
+    IGameSearchIndex? searchIndex = null)
 {
     private static readonly DistributedCacheEntryOptions CacheOptions = new()
     {
         AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5)
     };
 
+    public bool LastReadWasCacheHit { get; private set; }
+
     public async Task<List<Game>> ListAsync(CancellationToken ct = default)
     {
         const string cacheKey = "games:list";
         var cached = await GetFromCacheAsync<List<Game>>(cacheKey, ct);
-        if (cached is not null) return cached;
+        if (cached is not null)
+        {
+            LastReadWasCacheHit = true;
+            return cached;
+        }
 
+        LastReadWasCacheHit = false;
         var games = await db.Games.AsNoTracking().OrderBy(g => g.Name).ToListAsync(ct);
         await SetCacheAsync(cacheKey, games, ct);
         return games;
@@ -29,8 +39,13 @@ public class GameService(CatalogDbContext db, IDistributedCache? cache = null)
     {
         var cacheKey = $"games:{id}";
         var cached = await GetFromCacheAsync<Game>(cacheKey, ct);
-        if (cached is not null) return cached;
+        if (cached is not null)
+        {
+            LastReadWasCacheHit = true;
+            return cached;
+        }
 
+        LastReadWasCacheHit = false;
         var game = await db.Games.AsNoTracking().FirstOrDefaultAsync(g => g.Id == id, ct)
                    ?? throw new NotFoundException("Jogo nao encontrado.");
         await SetCacheAsync(cacheKey, game, ct);
@@ -44,6 +59,7 @@ public class GameService(CatalogDbContext db, IDistributedCache? cache = null)
         var game = new Game { Name = name, Description = description, Price = price };
         db.Games.Add(game);
         await db.SaveChangesAsync(ct);
+        if (searchIndex is not null) await searchIndex.IndexAsync(game, ct);
         await InvalidateListAsync(ct);
         return game;
     }
@@ -59,6 +75,7 @@ public class GameService(CatalogDbContext db, IDistributedCache? cache = null)
         game.Description = description;
         game.Price = price;
         await db.SaveChangesAsync(ct);
+        if (searchIndex is not null) await searchIndex.IndexAsync(game, ct);
         await InvalidateListAsync(ct);
         await RemoveCacheAsync($"games:{id}", ct);
     }
@@ -70,6 +87,7 @@ public class GameService(CatalogDbContext db, IDistributedCache? cache = null)
 
         db.Games.Remove(game);
         await db.SaveChangesAsync(ct);
+        if (searchIndex is not null) await searchIndex.RemoveAsync(id, ct);
         await InvalidateListAsync(ct);
         await RemoveCacheAsync($"games:{id}", ct);
     }

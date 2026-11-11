@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using System.Text;
+using System.Net.Http.Headers;
 using FiapCloudGames.CatalogApi.Consumers;
 using FiapCloudGames.CatalogApi.Data;
 using FiapCloudGames.CatalogApi.Exceptions;
@@ -20,20 +21,23 @@ if (string.IsNullOrWhiteSpace(jwtSecret) || jwtSecret.Length < 32)
 // IMPORTANTE: precisa ser o MESMO segredo/issuer/audience configurados na UsersAPI,
 // pois a CatalogAPI apenas valida tokens emitidos por ela - nao emite tokens propios.
 
+var catalogConnection = builder.Configuration.RequiredConnectionString("CatalogDatabase");
+var databaseProvider = builder.Configuration["Database:Provider"] ?? "Sqlite";
 builder.Services.AddDbContext<CatalogDbContext>(options =>
-    options.UseSqlite(builder.Configuration.GetConnectionString("CatalogDatabase")));
+{
+    if (databaseProvider.Equals("Postgres", StringComparison.OrdinalIgnoreCase))
+        options.UseNpgsql(catalogConnection, npgsql => npgsql.EnableRetryOnFailure());
+    else
+        options.UseSqlite(catalogConnection);
+});
 
 builder.Services.AddStackExchangeRedisCache(options =>
 {
-    options.Configuration = builder.Configuration.GetConnectionString("Redis")
-                            ?? builder.Configuration["Redis:ConnectionString"]
-                            ?? "localhost:6379";
+    options.Configuration = builder.Configuration.RequiredConnectionString("Redis");
     options.InstanceName = "fcg-catalog:";
 });
 builder.Services.AddSingleton<IMongoClient>(_ =>
-    new MongoClient(builder.Configuration.GetConnectionString("MongoDb")
-                    ?? builder.Configuration["MongoDb:ConnectionString"]
-                    ?? "mongodb://localhost:27017"));
+    new MongoClient(builder.Configuration.RequiredConnectionString("MongoDb")));
 builder.Services.AddSingleton(sp =>
 {
     var client = sp.GetRequiredService<IMongoClient>();
@@ -43,6 +47,19 @@ builder.Services.AddSingleton(sp =>
 builder.Services.AddScoped<GameService>();
 builder.Services.AddScoped<OrderService>();
 builder.Services.AddScoped<GameReviewService>();
+builder.Services.AddHttpClient<IGameSearchIndex, ElasticsearchGameSearchIndex>((sp, client) =>
+{
+    var configuration = sp.GetRequiredService<IConfiguration>();
+    var endpoint = configuration.RequiredValue("Elasticsearch:Uri").TrimEnd('/') + "/";
+    var username = configuration.RequiredValue("Elasticsearch:Username");
+    var password = configuration.RequiredValue("Elasticsearch:Password");
+    var basicToken = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"));
+
+    client.BaseAddress = new Uri(endpoint);
+    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", basicToken);
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+builder.Services.AddHostedService<GameSearchBootstrapper>();
 
 builder.Services.AddMassTransit(bus =>
 {
@@ -51,8 +68,8 @@ builder.Services.AddMassTransit(bus =>
     {
         cfg.Host(builder.Configuration["RabbitMq:Host"] ?? "localhost", "/", host =>
         {
-            host.Username(builder.Configuration["RabbitMq:Username"] ?? "guest");
-            host.Password(builder.Configuration["RabbitMq:Password"] ?? "guest");
+            host.Username(builder.Configuration.RequiredValue("RabbitMq:Username"));
+            host.Password(builder.Configuration.RequiredValue("RabbitMq:Password"));
         });
 
         cfg.ReceiveEndpoint("catalog-payment-processed", endpoint =>
@@ -121,12 +138,20 @@ using (var scope = app.Services.CreateScope())
 
 var games = app.MapGroup("/api/games").WithTags("Games");
 
-games.MapGet("/", async (GameService service, CancellationToken ct) =>
-    Results.Ok((await service.ListAsync(ct)).Select(g => g.ToResponse())))
+games.MapGet("/", async (HttpContext context, GameService service, CancellationToken ct) =>
+{
+    var result = await service.ListAsync(ct);
+    context.Response.Headers["X-Cache"] = service.LastReadWasCacheHit ? "HIT" : "MISS";
+    return Results.Ok(result.Select(g => g.ToResponse()));
+})
     .RequireAuthorization();
 
-games.MapGet("/{id:guid}", async (Guid id, GameService service, CancellationToken ct) =>
-    Results.Ok((await service.FindAsync(id, ct)).ToResponse()))
+games.MapGet("/{id:guid}", async (Guid id, HttpContext context, GameService service, CancellationToken ct) =>
+{
+    var result = await service.FindAsync(id, ct);
+    context.Response.Headers["X-Cache"] = service.LastReadWasCacheHit ? "HIT" : "MISS";
+    return Results.Ok(result.ToResponse());
+})
     .RequireAuthorization();
 
 games.MapGet("/{id:guid}/reviews", async (Guid id, GameReviewService service, CancellationToken ct) =>
@@ -181,6 +206,22 @@ games.MapDelete("/{id:guid}", async (Guid id, GameService service, CancellationT
 })
 .RequireAuthorization("Administrator");
 
+app.MapGet("/search", async (string q, int? limit, IGameSearchIndex search, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(q))
+        return Results.BadRequest(new { erro = "Informe o termo de busca no parametro q." });
+
+    var results = await search.SearchAsync(q.Trim(), Math.Clamp(limit ?? 20, 1, 100), ct);
+    return Results.Ok(results.Select(hit => new SearchGameResponse(
+        hit.Game.Id,
+        hit.Game.Name,
+        hit.Game.Description,
+        hit.Game.Price,
+        hit.Score)));
+})
+.WithTags("Search")
+.RequireAuthorization();
+
 var users = app.MapGroup("/api/users").WithTags("Biblioteca e Compras");
 
 users.MapGet("/{userId:guid}/library", async (Guid userId, ClaimsPrincipal principal, OrderService service, CancellationToken ct) =>
@@ -228,6 +269,7 @@ public partial class Program;
 public sealed record CreateGameRequest(string Name, string Description, decimal Price);
 public sealed record UpdateGameRequest(string Name, string Description, decimal Price);
 public sealed record GameResponse(Guid Id, string Name, string Description, decimal Price);
+public sealed record SearchGameResponse(Guid Id, string Name, string Description, decimal Price, double Score);
 public sealed record CreateGameReviewRequest(int Rating, string Comment, Dictionary<string, string>? Metadata);
 public sealed record GameReviewResponse(string Id, Guid GameId, Guid UserId, string UserEmail, int Rating, string Comment, Dictionary<string, string> Metadata, DateTime CreatedAtUtc);
 
@@ -238,6 +280,17 @@ internal static class ResponseMapping
 
     public static GameReviewResponse ToResponse(this FiapCloudGames.CatalogApi.Domain.GameReview review) =>
         new(review.Id, review.GameId, review.UserId, review.UserEmail, review.Rating, review.Comment, review.Metadata, review.CreatedAtUtc);
+}
+
+internal static class ConfigurationExtensions
+{
+    public static string RequiredConnectionString(this IConfiguration configuration, string name) =>
+        configuration.GetConnectionString(name)
+        ?? throw new InvalidOperationException($"ConnectionStrings:{name} nao configurada.");
+
+    public static string RequiredValue(this IConfiguration configuration, string key) =>
+        configuration[key]
+        ?? throw new InvalidOperationException($"{key} nao configurado.");
 }
 
 internal static class AuthorizationExtensions

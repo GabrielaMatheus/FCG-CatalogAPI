@@ -5,8 +5,7 @@ metadata:
 data:
   Jwt__Issuer: "FiapCloudGames.UsersApi"
   Jwt__Audience: "FiapCloudGames"
+  Database__Provider: "Postgres"
   MongoDb__Database: "fcg_catalog"
-  ConnectionStrings__Redis: "redis:6379"
-  RabbitMq__Host: "rabbitmq"
-  RabbitMq__Username: "guest"
+  Elasticsearch__IndexName: "fcg-games"
   ASPNETCORE_URLS: "http://+:8080"
